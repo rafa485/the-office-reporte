@@ -9,20 +9,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Config ──────────────────────────────────────────────────────────────────
-SHEET_ID         = "1F3SP6ZRFqXG5FA1md4AIF2v_tVEvPbZX7tT7TfYjIog"
-CLARITY_TOKEN    = os.getenv("CLARITY_TOKEN")
-CLARITY_PROJECT  = "w88ytv9ego"
-CLICKUP_CHANNEL  = "rk6q9-12737"
-CLICKUP_TOKEN    = os.getenv("CLICKUP_TOKEN")
+SHEET_ID          = "1F3SP6ZRFqXG5FA1md4AIF2v_tVEvPbZX7tT7TfYjIog"
+GHL_SHEET_ID = "1yd2IKXL_BMicw-8kOEObQBuiCQLNYbtlIa4sur-STig"
+CLARITY_TOKEN     = os.getenv("CLARITY_TOKEN")
+CLARITY_PROJECT   = "w88ytv9ego"
+CLICKUP_CHANNEL   = "rk6q9-12737"
+CLICKUP_TOKEN     = os.getenv("CLICKUP_TOKEN")
 GOOGLE_TOKEN_JSON = os.getenv("GOOGLE_TOKEN_JSON")
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-# ── Google Sheets ────────────────────────────────────────────────────────────
-def get_ga4_data():
+def get_gspread_client():
     token_info = json.loads(GOOGLE_TOKEN_JSON)
     creds = Credentials(
         token=token_info.get("token"),
@@ -32,36 +29,34 @@ def get_ga4_data():
         client_secret=token_info.get("client_secret"),
         scopes=SCOPES,
     )
-    gc = gspread.authorize(creds)
+    return gspread.authorize(creds)
+
+# ── GA4 desde Google Sheets ──────────────────────────────────────────────────
+def get_ga4_data(gc):
     sh = gc.open_by_key(SHEET_ID)
 
-    # Pestaña de ayer
     ws_ayer = sh.worksheet("LP Junio 2026 - Ayer")
     data_ayer = ws_ayer.get_all_values()
 
-    # Pestaña de 7 días
     ws_7d = sh.worksheet("LP Junio 2026 - 7 dias")
     data_7d = ws_7d.get_all_values()
 
     def parse_totals(data):
-        """Encuentra la fila de totales en el reporte GA4."""
         totals = {"sessions": 0, "activeUsers": 0, "conversion_gratuito": 0, "conversion_upsell": 0}
         for i, row in enumerate(data):
             if "sessions" in row or "Sessions" in row:
-                # siguiente fila son los valores
                 try:
                     vals = data[i + 1]
-                    totals["sessions"] = int(float(vals[3])) if len(vals) > 3 and vals[3] else 0
-                    totals["activeUsers"] = int(float(vals[4])) if len(vals) > 4 and vals[4] else 0
-                    totals["conversion_gratuito"] = int(float(vals[5])) if len(vals) > 5 and vals[5] else 0
-                    totals["conversion_upsell"] = int(float(vals[6])) if len(vals) > 6 and vals[6] else 0
+                    totals["sessions"]             = int(float(vals[3])) if len(vals) > 3 and vals[3] else 0
+                    totals["activeUsers"]          = int(float(vals[4])) if len(vals) > 4 and vals[4] else 0
+                    totals["conversion_gratuito"]  = int(float(vals[5])) if len(vals) > 5 and vals[5] else 0
+                    totals["conversion_upsell"]    = int(float(vals[6])) if len(vals) > 6 and vals[6] else 0
                 except (ValueError, IndexError):
                     pass
                 break
         return totals
 
     def parse_sources(data):
-        """Extrae top 3 fuentes por sesiones."""
         sources = []
         header_found = False
         for row in data:
@@ -81,6 +76,52 @@ def get_ga4_data():
         "ayer": parse_totals(data_ayer),
         "siete_dias": parse_totals(data_7d),
         "top_fuentes": parse_sources(data_ayer),
+    }
+
+# ── GHL desde Google Sheets ──────────────────────────────────────────────────
+def get_ghl_data(gc):
+    sh = sh = gc.open_by_key(GHL_SHEET_ID)
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def contar_filas(worksheet_name, col_fecha=1):
+        """Cuenta filas totales y de ayer en una pestaña dado el índice de columna de fecha (0-based)."""
+        try:
+            ws = sh.worksheet(worksheet_name)
+            rows = ws.get_all_values()
+            total = 0
+            ayer = 0
+            for row in rows[1:]:  # skip header
+                if len(row) > col_fecha and row[col_fecha]:
+                    total += 1
+                    fecha_str = row[col_fecha].strip()
+                    # Intenta varios formatos de fecha
+                    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"):
+                        try:
+                            fecha = datetime.strptime(fecha_str[:10], fmt[:10])
+                            if fecha.strftime("%Y-%m-%d") == yesterday:
+                                ayer += 1
+                            break
+                        except ValueError:
+                            continue
+            return {"total": total, "ayer": ayer}
+        except Exception as e:
+            print(f"Error leyendo {worksheet_name}: {e}")
+            return {"total": 0, "ayer": 0}
+
+    registros_ads  = contar_filas("ADS | Regisros The Office", col_fecha=1)
+    registros_org  = contar_filas("ORG | Regisros The Office", col_fecha=1)
+    ventas_vip     = contar_filas("Ventas UPSELL VIP", col_fecha=1)
+    pagos_fallidos = contar_filas("Pagos Fallidos UPSELL", col_fecha=1)
+
+    return {
+        "registros_ads_ayer":  registros_ads["ayer"],
+        "registros_org_ayer":  registros_org["ayer"],
+        "registros_ads_total": registros_ads["total"],
+        "registros_org_total": registros_org["total"],
+        "ventas_ayer":         ventas_vip["ayer"],
+        "ventas_total":        ventas_vip["total"],
+        "pagos_fallidos_ayer": pagos_fallidos["ayer"],
+        "pagos_fallidos_total":pagos_fallidos["total"],
     }
 
 # ── Clarity ──────────────────────────────────────────────────────────────────
@@ -104,7 +145,7 @@ def get_clarity_data():
                 info = item.get("information", [{}])[0]
                 if metric == "DeadClickCount":
                     result["dead_clicks"] = int(info.get("subTotal", 0))
-                    result["sessions"] = int(info.get("sessionsCount", 0))
+                    result["sessions"]    = int(info.get("sessionsCount", 0))
                     result["scroll_depth"] = round(float(info.get("sessionsWithoutMetricPercentage", 0)), 1)
                 elif metric == "RageClickCount":
                     result["rage_clicks"] = int(info.get("subTotal", 0))
@@ -113,43 +154,48 @@ def get_clarity_data():
         print(f"Clarity error: {e}")
     return {"scroll_depth": 0, "dead_clicks": 0, "rage_clicks": 0, "sessions": 0}
 
-# ── Acciones por tier ────────────────────────────────────────────────────────
-def generar_acciones(ga4, clarity):
+# ── Acciones ─────────────────────────────────────────────────────────────────
+def generar_acciones(ga4, clarity, ghl):
     acciones = {"urgente": [], "medio": [], "bajo": []}
     ayer = ga4["ayer"]
-    siete = ga4["siete_dias"]
 
-    # Tasa de conversión
-    tasa = (ayer["conversion_gratuito"] / ayer["sessions"] * 100) if ayer["sessions"] > 0 else 0
+    registros_ayer = ghl["registros_ads_ayer"] + ghl["registros_org_ayer"]
+    tasa = (registros_ayer / ayer["sessions"] * 100) if ayer["sessions"] > 0 else 0
+    upsell_rate = (ghl["ventas_ayer"] / registros_ayer * 100) if registros_ayer > 0 else 0
 
-    if tasa == 0 and ayer["sessions"] > 50:
-        acciones["urgente"].append("⚠️ 0 conversiones registradas — verificar que el evento registro_completado esté disparando en GTM")
+    if registros_ayer == 0 and ayer["sessions"] > 50:
+        acciones["urgente"].append("0 registros nuevos ayer — revisar formulario y flujo de registro")
     elif tasa < 10 and ayer["sessions"] > 50:
         acciones["urgente"].append(f"Tasa de conversión baja ({tasa:.1f}%) — revisar CTA y formulario en LP")
 
     if clarity["rage_clicks"] > 10:
         acciones["urgente"].append(f"🔴 {clarity['rage_clicks']} rage clicks — posible elemento roto en la página")
 
+    if clarity["dead_clicks"] > 20:
+        acciones["medio"].append(f"{clarity['dead_clicks']} dead clicks — revisar elementos no interactivos")
+
     if clarity["scroll_depth"] < 40:
         acciones["medio"].append(f"Scroll depth bajo ({clarity['scroll_depth']}%) — hero section puede no estar enganchando")
 
-    if clarity["dead_clicks"] > 20:
-        acciones["medio"].append(f"{clarity['dead_clicks']} dead clicks — revisar elementos no interactivos que confunden al usuario")
+    if ghl["pagos_fallidos_ayer"] > 0:
+        acciones["medio"].append(f"{ghl['pagos_fallidos_ayer']} pago(s) fallido(s) ayer — seguimiento con Jenn")
 
-    upsell_rate = (ayer["conversion_upsell"] / ayer["conversion_gratuito"] * 100) if ayer["conversion_gratuito"] > 0 else 0
-    if upsell_rate < 5 and ayer["conversion_gratuito"] > 10:
-        acciones["medio"].append(f"Tasa de upsell baja ({upsell_rate:.1f}%) — revisar página de upsell y oferta VIP")
+    if upsell_rate < 5 and registros_ayer > 10:
+        acciones["medio"].append(f"Tasa de upsell baja ({upsell_rate:.1f}%) — revisar página de upsell")
 
     if not acciones["urgente"] and not acciones["medio"]:
         acciones["bajo"].append("Todo en parámetros normales — continuar monitoreando")
 
     return acciones, tasa, upsell_rate
 
-# ── Mensaje ClickUp ──────────────────────────────────────────────────────────
-def build_message(ga4, clarity, acciones, tasa, upsell_rate):
+# ── Mensaje ──────────────────────────────────────────────────────────────────
+def build_message(ga4, clarity, ghl, acciones, tasa, upsell_rate):
     ayer = ga4["ayer"]
     siete = ga4["siete_dias"]
     hoy = datetime.now().strftime("%d/%m/%Y")
+
+    registros_ayer  = ghl["registros_ads_ayer"] + ghl["registros_org_ayer"]
+    registros_total = ghl["registros_ads_total"] + ghl["registros_org_total"]
 
     fuentes_txt = ""
     for f in ga4["top_fuentes"]:
@@ -159,28 +205,41 @@ def build_message(ga4, clarity, acciones, tasa, upsell_rate):
     medio_txt   = "\n".join(f"  🟡 {a}" for a in acciones["medio"])   or "  ✅ Sin alertas medias"
     bajo_txt    = "\n".join(f"  🟢 {a}" for a in acciones["bajo"])    or ""
 
-    msg = f"""📊 *THE OFFICE JUN 2026 | Reporte Diario LP*
+    msg = f"""📊 *THE OFFICE JUN 2026 | Reporte Diario*
 📅 {hoy}
 
 ━━━━━━━━━━━━━━━━━━━
-📈 GA4 — AYER
+📋 GHL — REGISTROS Y VENTAS
 ━━━━━━━━━━━━━━━━━━━
-• Sesiones LP:        {ayer['sessions']}
-• Usuarios activos:   {ayer['activeUsers']}
-• Registros gratuitos: {ayer['conversion_gratuito']}
-• Ventas Speaker Pro: {ayer['conversion_upsell']}
-• Tasa conversión LP: {tasa:.1f}%
+AYER:
+• Registros ADS:      {ghl['registros_ads_ayer']}
+• Registros ORG:      {ghl['registros_org_ayer']}
+• Total registros:    {registros_ayer}
+• Ventas Speaker Pro: {ghl['ventas_ayer']}
+• Pagos fallidos:     {ghl['pagos_fallidos_ayer']}
+• Tasa conversión:    {tasa:.1f}%
 • Tasa upsell:        {upsell_rate:.1f}%
+
+ACUMULADO TOTAL:
+• Registros ADS:      {ghl['registros_ads_total']}
+• Registros ORG:      {ghl['registros_org_total']}
+• Total registros:    {registros_total}
+• Ventas Speaker Pro: {ghl['ventas_total']}
+• Pagos fallidos:     {ghl['pagos_fallidos_total']}
+
+━━━━━━━━━━━━━━━━━━━
+📈 GA4 — TRÁFICO LP AYER
+━━━━━━━━━━━━━━━━━━━
+• Sesiones:           {ayer['sessions']}
+• Usuarios activos:   {ayer['activeUsers']}
 
 Top fuentes:{fuentes_txt}
 
 ━━━━━━━━━━━━━━━━━━━
-📅 GA4 — ÚLTIMOS 7 DÍAS
+📈 GA4 — TRÁFICO LP 7 DÍAS
 ━━━━━━━━━━━━━━━━━━━
-• Sesiones LP:        {siete['sessions']}
+• Sesiones:           {siete['sessions']}
 • Usuarios activos:   {siete['activeUsers']}
-• Registros gratuitos: {siete['conversion_gratuito']}
-• Ventas Speaker Pro: {siete['conversion_upsell']}
 
 ━━━━━━━━━━━━━━━━━━━
 🎯 CLARITY — AYER
@@ -218,17 +277,23 @@ def send_to_clickup(message):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    print("Conectando a Google Sheets...")
+    gc = get_gspread_client()
+
     print("Obteniendo datos de GA4...")
-    ga4 = get_ga4_data()
+    ga4 = get_ga4_data(gc)
+
+    print("Obteniendo datos de GHL (Sheets)...")
+    ghl = get_ghl_data(gc)
 
     print("Obteniendo datos de Clarity...")
     clarity = get_clarity_data()
 
     print("Generando acciones...")
-    acciones, tasa, upsell_rate = generar_acciones(ga4, clarity)
+    acciones, tasa, upsell_rate = generar_acciones(ga4, clarity, ghl)
 
     print("Construyendo mensaje...")
-    msg = build_message(ga4, clarity, acciones, tasa, upsell_rate)
+    msg = build_message(ga4, clarity, ghl, acciones, tasa, upsell_rate)
     print(msg)
 
     print("Enviando a ClickUp...")
